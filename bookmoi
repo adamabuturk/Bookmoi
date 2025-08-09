@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>BookMoi – Offline Standalone (No CDNs)</title>
+    <style>
+      :root { --pink:#ec4899; --pink-d:#be3579; --ink:#111827; --muted:#6b7280; --bg:#ffffff; --border:#e5e7eb; }
+      *{box-sizing:border-box} html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,"Helvetica Neue",Arial,"Apple Color Emoji","Segoe UI Emoji"}
+      a{color:inherit;text-decoration:none}
+      .container{max-width:1120px;margin:0 auto;padding:0 16px}
+      .btn{background:var(--pink);color:#fff;border:0;border-radius:12px;padding:10px 14px;font-weight:600;cursor:pointer}
+      .btn:disabled{opacity:.6;cursor:not-allowed}
+      .btn-outline{background:transparent;color:#fff;border:1px solid #ffffff66}
+      .card{background:#fff;border:1px solid var(--border);border-radius:16px;box-shadow:0 2px 10px rgba(17,24,39,.05)}
+      .input, select{width:100%;border:1px solid var(--border);border-radius:12px;padding:10px 12px}
+      .header{background:var(--pink);color:#fff}
+      .nav{display:flex;align-items:center;justify-content:space-between;padding:12px 0}
+      .nav a{opacity:.95}
+      .nav a:hover{text-decoration:underline}
+      .hero{background:#fde5f1;padding:48px 0;text-align:center}
+      .list{list-style:none;margin:0;padding:0}
+      .list li{padding:14px 16px;border:1px solid var(--border);border-radius:14px;display:flex;align-items:center;justify-content:space-between}
+      .grid{display:grid;gap:16px}
+      @media(min-width:768px){.grid-2{grid-template-columns:1fr 1fr}.grid-3{grid-template-columns:repeat(3,1fr)}}
+      .muted{color:var(--muted)}
+      .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#111827;color:#fff;border-radius:999px;padding:10px 14px;box-shadow:0 10px 30px rgba(0,0,0,.15);opacity:0;pointer-events:none;transition:.25s}
+      .toast.show{opacity:1}
+      .banner{background:#fee2e2;color:#991b1b;border:1px solid #fecaca;padding:10px 12px;border-radius:12px}
+      .spacer{height:16px}
+      .hidden{display:none}
+    </style>
+  </head>
+  <body>
+    <header class="header">
+      <div class="container nav">
+        <a href="#/" id="brand" style="font-size:22px;font-weight:800">BookMoi</a>
+        <nav style="display:flex;gap:16px;align-items:center">
+          <a href="#/salons/salon-prestige">Salon</a>
+          <a href="#/mes-reservations" id="nav-my">Mes réservations</a>
+          <a href="#/login" id="nav-login">Connexion</a>
+          <button id="nav-logout" class="btn btn-outline" style="display:none">Se déconnecter</button>
+        </nav>
+      </div>
+    </header>
+
+    <main id="app"></main>
+    <div id="toast" class="toast"></div>
+
+    <script>
+      // ======= Utilities =======
+      const $ = (sel, root=document) => root.querySelector(sel);
+      const $$ = (sel, root=document) => Array.from(root.querySelectorAll(sel));
+      const toastEl = $('#toast');
+      function toast(msg){ toastEl.textContent = msg; toastEl.classList.add('show'); setTimeout(()=>toastEl.classList.remove('show'), 2200); }
+      function navigate(hash){ if(location.hash!==hash) location.hash = hash; else router(); }
+      function todayISO(){ const d=new Date(); const m=String(d.getMonth()+1).padStart(2,'0'); const dd=String(d.getDate()).padStart(2,'0'); return `${d.getFullYear()}-${m}-${dd}`; }
+      function addMinutesToTimeStr(timeStr, minutes){ const [h,m]=String(timeStr).split(':').map(Number); if(Number.isNaN(h)||Number.isNaN(m)) return timeStr; const d=new Date(0,0,0,h,m+Number(minutes)); return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`; }
+
+      // ======= Storage =======
+      const AUTH_KEY = 'bookmoi:auth:user';
+      const SALON_KEY = id => `bookmoi:salon:${id}`;
+      const USER_BOOKINGS = email => `bookmoi:user:${email}:bookings`;
+      const getUser = () => { try{ return JSON.parse(localStorage.getItem(AUTH_KEY)); }catch{ return null } };
+      const login = email => localStorage.setItem(AUTH_KEY, JSON.stringify({ email }));
+      const logout = () => localStorage.removeItem(AUTH_KEY);
+      const loadSalon = id => { const raw = localStorage.getItem(SALON_KEY(id)); return raw? JSON.parse(raw): null; };
+      const saveSalon = (id,data) => localStorage.setItem(SALON_KEY(id), JSON.stringify(data));
+      const loadUserBookings = email => { const raw = localStorage.getItem(USER_BOOKINGS(email)); return raw? JSON.parse(raw): []; };
+      const saveUserBookings = (email, list) => localStorage.setItem(USER_BOOKINGS(email), JSON.stringify(list));
+
+      // Seed default salon once
+      const DEFAULT_SALON = {
+        name: 'Salon Prestige',
+        description: 'Bienvenue chez Salon Prestige. Nous vous offrons les meilleurs soins de beauté à Paris.',
+        services: [
+          { name: 'Coupe de cheveux', price: '25€' },
+          { name: 'Massage relaxant', price: '40€' },
+          { name: 'Manucure', price: '20€' }
+        ],
+        appointments: [
+          { client: 'Laura Dupont', date: todayISO(), start: '10:00', duration: 30 },
+          { client: 'Nicolas Martin', date: todayISO(), start: '11:00', duration: 45 }
+        ]
+      };
+      if(!loadSalon('salon-prestige')) saveSalon('salon-prestige', DEFAULT_SALON);
+
+      // ======= Nav state =======
+      function refreshNav(){
+        const user = getUser();
+        $('#nav-my').style.display = user? 'inline':'none';
+        $('#nav-login').style.display = user? 'none':'inline';
+        $('#nav-logout').style.display = user? 'inline':'none';
+      }
+      $('#nav-logout').addEventListener('click', ()=>{ logout(); refreshNav(); navigate('#/'); });
+
+      // ======= Tiny hash router =======
+      const routes = [
+        { match: /^#\/$/, render: Home },
+        { match: /^#\/?$/, render: Home },
+        { match: /^#\/login$/, render: Login },
+        { match: /^#\/salons\/([a-z0-9-]+)$/i, render: SalonProfile },
+        { match: /^#\/mes-reservations$/, render: MyBookings },
+      ];
+      function router(){
+        const hash = location.hash || '#/' ;
+        const route = routes.find(r=> r.match.test(hash));
+        if(!route){ navigate('#/'); return; }
+        const params = route.match.exec(hash) || [];
+        const target = $('#app');
+        target.innerHTML = route.render.apply(null, params.slice(1));
+        // Attach events declared with data-action
+        $$('[data-action]', target).forEach(el=>{
+          const fn = actions[el.getAttribute('data-action')];
+          if(fn) el.addEventListener('click', fn);
+        });
+        // Attach forms by id
+        if(window._afterRender) window._afterRender();
+        refreshNav();
+      }
+      window.addEventListener('hashchange', router);
+
+      // ======= Actions registry =======
+      const actions = {
+        toLogin(){ navigate('#/login'); },
+      };
+
+      // ======= Views =======
+      function Home(){
+        const shops = [
+          { name: 'Salon Prestige', distance: '1.2 km', url: '#/salons/salon-prestige' },
+          { name: 'Zen Spa Center', distance: '1.5 km', url: '#/salons/zen-spa-center' },
+          { name: 'Glow Beauty Studio', distance: '2.0 km', url: '#/salons/glow-beauty-studio' },
+        ];
+        return `
+          <section class="hero"><div class="container">
+            <h2 style="font-size:36px;font-weight:800;margin:0 0 12px">Réservez vos soins beauté à tout moment</h2>
+            <p class="muted" style="margin:0 0 20px">Des milliers d’établissements notés par les clients. Offres heures creuses et dernière minute disponibles.</p>
+            <input class="input" placeholder="Que recherchez-vous ?" />
+          </div></section>
+          <section style="padding:28px 0"><div class="container">
+            <h3 style="font-size:22px;font-weight:700;margin:0 0 14px">Salons populaires</h3>
+            <ul class="grid grid-2 list">
+              ${shops.map(s=>`<li><div><a href="${s.url}" style="color:var(--pink);font-weight:600">${s.name}</a></div><span class="muted">${s.distance}</span></li>`).join('')}
+            </ul>
+          </div></section>
+        `;
+      }
+
+      function SalonProfile(salonId){
+        // Load or init salon
+        let data = loadSalon(salonId) || { ...DEFAULT_SALON, name: salonId.replace(/-/g,' ').replace(/\b\w/g,m=>m.toUpperCase()) };
+        saveSalon(salonId, data);
+        const user = getUser();
+
+        window._afterRender = () => {
+          const form = $('#book-form');
+          if(form){
+            form.addEventListener('submit', (e)=>{
+              e.preventDefault();
+              if(!getUser()){ navigate('#/login'); return; }
+              const fd = new FormData(form);
+              const client = fd.get('client');
+              const date = fd.get('date');
+              const start = fd.get('start');
+              const duration = Number(fd.get('duration'));
+              if(!client || !date || !start) return;
+              const newAppt = { client, date, start, duration };
+              data.appointments.push(newAppt);
+              saveSalon(salonId, data);
+              const u = getUser();
+              const list = loadUserBookings(u.email);
+              list.push({ salonId, salonName: data.name, ...newAppt });
+              saveUserBookings(u.email, list);
+              form.reset();
+              $('#date').value = todayISO();
+              $('#start').value = '14:00';
+              $('#duration').value = '30';
+              toast('✅ Réservation confirmée');
+              router(); // re-render list
+            });
+          }
+        };
+
+        return `
+          <section style="padding:24px 0"><div class="container grid grid-2">
+            <div>
+              <h1 style="font-size:28px;font-weight:800;margin:0 0 6px">${data.name}</h1>
+              <p class="muted" style="margin:0 0 16px">${data.description}</p>
+
+              <h2 style="font-size:20px;font-weight:700;margin:18px 0 8px">Services</h2>
+              <ul class="list" style="display:flex;flex-direction:column;gap:10px">
+                ${data.services.map(s=>`<li><span>${s.name}</span><strong>${s.price}</strong></li>`).join('')}
+              </ul>
+
+              <h2 style="font-size:20px;font-weight:700;margin:22px 0 8px">Réserver un créneau</h2>
+              ${user ? `
+                <form id="book-form" class="card" style="padding:14px">
+                  <div class="grid grid-3" style="grid-template-columns:2fr 1fr 1fr 1fr;gap:12px">
+                    <input id="client" name="client" class="input" placeholder="Nom du client" required />
+                    <input id="date" name="date" type="date" class="input" value="${todayISO()}" required />
+                    <input id="start" name="start" type="time" class="input" value="14:00" required />
+                    <select id="duration" name="duration" class="input">
+                      <option value="15">15 min</option>
+                      <option value="30" selected>30 min</option>
+                      <option value="45">45 min</option>
+                      <option value="60">60 min</option>
+                    </select>
+                  </div>
+                  <div class="spacer"></div>
+                  <div style="display:flex;align-items:center;gap:12px;justify-content:space-between">
+                    <small class="muted">Fin estimée : <span id="end-preview">—</span></small>
+                    <button class="btn">Réserver</button>
+                  </div>
+                </form>
+                <script>
+                  (function(){
+                    const s = document.currentScript.parentElement;
+                    const start = s.querySelector('#start');
+                    const dur = s.querySelector('#duration');
+                    const end = s.querySelector('#end-preview');
+                    function update(){ end.textContent = addMinutesToTimeStr(start.value || '00:00', dur.value || 30); }
+                    start.addEventListener('input', update); dur.addEventListener('change', update); update();
+                  })();
+                </script>
+              ` : `
+                <div class="banner">Connectez-vous pour réserver un créneau. <a href="#/login" style="text-decoration:underline">Se connecter</a></div>
+              `}
+
+              <h3 style="font-size:18px;font-weight:700;margin:22px 0 8px">Rendez-vous à venir</h3>
+              <ul class="list" style="display:flex;flex-direction:column;gap:10px">
+                ${data.appointments.map(a=>`<li>
+                  <span>${a.client}</span>
+                  <span class="muted">${a.date} — ${a.start} → ${addMinutesToTimeStr(a.start, a.duration||30)} (${a.duration||30} min)</span>
+                </li>`).join('')}
+              </ul>
+            </div>
+          </div></section>
+        `;
+      }
+
+      function MyBookings(){
+        const user = getUser();
+        if(!user){ return `<section style="padding:24px 0"><div class="container"><div class="banner">Veuillez vous connecter pour voir vos réservations. <a href="#/login" style="text-decoration:underline">Se connecter</a></div></div></section>`; }
+        const list = loadUserBookings(user.email);
+        window._afterRender = () => {
+          $$('.btn-cancel').forEach((btn, idx)=>{
+            btn.addEventListener('click', ()=>{
+              const b = list[idx];
+              // remove from user list
+              const next = list.filter((_,i)=>i!==idx);
+              saveUserBookings(user.email, next);
+              // remove from salon as well
+              const salon = loadSalon(b.salonId);
+              if(salon){
+                salon.appointments = (salon.appointments||[]).filter(a=>!(a.client===b.client && a.date===b.date && a.start===b.start && (a.duration||30)===(b.duration||30)));
+                saveSalon(b.salonId, salon);
+              }
+              toast('Réservation annulée');
+              router();
+            });
+          });
+        };
+        return `
+          <section style="padding:24px 0"><div class="container">
+            <h1 style="font-size:24px;font-weight:800;margin:0 0 12px">Mes réservations</h1>
+            ${list.length? `<ul class="grid" style="gap:12px">${list.map(b=>`
+              <li class="card" style="padding:12px;display:flex;align-items:center;justify-content:space-between">
+                <div>
+                  <div style="font-weight:600">${b.salonName}</div>
+                  <div class="muted" style="font-size:14px">${b.client} — ${b.date}, ${b.start} → ${addMinutesToTimeStr(b.start, b.duration||30)} (${b.duration||30} min)</div>
+                </div>
+                <button class="btn btn-cancel" style="background:#ef4444">Annuler</button>
+              </li>
+            `).join('')}</ul>` : `<p class="muted">Aucune réservation. Allez sur un salon pour réserver.</p>`}
+          </div></section>
+        `;
+      }
+
+      function Login(){
+        window._afterRender = () => {
+          const form = $('#login-form');
+          form.addEventListener('submit', e=>{
+            e.preventDefault();
+            const email = $('#email').value.trim();
+            if(!email){ toast('Entrez un email'); return; }
+            login(email);
+            refreshNav();
+            toast('Connecté');
+            navigate('#/');
+          });
+        };
+        return `
+          <section style="padding:32px 0"><div class="container" style="max-width:560px">
+            <form id="login-form" class="card" style="padding:16px">
+              <h1 style="font-size:24px;font-weight:800;margin:0 0 12px">Connexion</h1>
+              <label class="muted" for="email">Email</label>
+              <input id="email" class="input" placeholder="salon@email.com" />
+              <div class="spacer"></div>
+              <label class="muted" for="pwd">Mot de passe</label>
+              <input id="pwd" type="password" class="input" placeholder="••••••" />
+              <div class="spacer"></div>
+              <button class="btn" type="submit">Se connecter</button>
+              <p class="muted" style="font-size:12px;margin-top:8px">Démo : n'importe quel email/mot de passe fonctionne.</p>
+            </form>
+          </div></section>
+        `;
+      }
+
+      // ======= Boot =======
+      if(!location.hash) location.hash = '#/' ;
+      refreshNav();
+      router();
+
+      // ======= Smoke tests (simple) =======
+      console.assert(typeof loadSalon==='function', 'Storage helpers should exist');
+      console.assert(typeof router==='function', 'Router should exist');
+    </script>
+  </body>
+</html>
